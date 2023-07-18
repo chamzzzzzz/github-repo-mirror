@@ -224,7 +224,7 @@ func clone(url, local string) (*exec.Cmd, error) {
 }
 
 func touch(local string) (*exec.Cmd, error) {
-	cmd := exec.Command("touch", filepath.Join(local, "refs", ".gitkeep"))
+	cmd := exec.Command("touch", filepath.Join(local, "refs", ".gitkeep"), filepath.Join(local, "objects", ".gitkeep"))
 	err := cmd.Run()
 	return cmd, err
 }
