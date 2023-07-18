@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -22,6 +23,18 @@ type Source struct {
 type Config struct {
 	Sources     []*Source
 	Destination string
+	MaxPackSize int64
+}
+
+type Stat struct {
+	Source       *Source
+	Repos        []*Repo
+	Skipped      int
+	Mirrored     int
+	Updated      int
+	Failed       int
+	FailedMirror int
+	FailedUpdate int
 }
 
 func main() {
@@ -37,44 +50,83 @@ func main() {
 		}
 	}
 
+	var stats []*Stat
 	for _, source := range config.Sources {
+		stat := &Stat{
+			Source: source,
+		}
+		stats = append(stats, stat)
 		repos, err := getRepo(source)
 		if err != nil {
-			log.Fatalf("Failed to get source %s: %s", source.Username, err)
+			log.Printf("Failed to get source [%s] repos. error:'%s'", source.Username, err)
+			continue
 		}
-		log.Printf("Found %d repos for source %s", len(repos), source.Username)
+		stat.Repos = repos
+		log.Printf("Found %d repos for source [%s]", len(repos), source.Username)
 		for _, repo := range repos {
 			remote := fmt.Sprintf("https://github.com/%s.git", repo.FullName)
 			local := fmt.Sprintf("%s.git", filepath.Join(config.Destination, "github.com", repo.FullName))
 			if skip(source, remote) {
-				log.Printf("Skipping [%s]", remote)
+				stat.Skipped++
 				continue
 			}
 			_, err := os.Stat(local)
 			if err != nil {
 				if !os.IsNotExist(err) {
-					log.Fatalf("Failed to stat [%s]: %s", local, err)
+					log.Printf("Failed to stat [%s]: %s", local, err)
+					stat.Failed++
+					continue
 				}
-				log.Printf("mirror clone [%s] to [%s]", remote, local)
 				url := remote
 				if repo.Private {
 					url = strings.Replace(remote, "https://", fmt.Sprintf("https://%s:%s@", source.Username, source.Token), 1)
 				}
-				cmd := exec.Command("git", "clone", "--quiet", "--mirror", url, local)
-				err := cmd.Run()
+				log.Printf("Mirroring [%s] -> [%s]", remote, local)
+				_, err := clone(url, local)
 				if err != nil {
-					log.Fatalf("Failed to mirror clone [%s] to [%s]: %s", remote, local, err)
+					log.Printf("Failed mirror [%s] -> [%s]: clone error:'%s'", remote, local, err)
+					remove(local)
+					stat.FailedMirror++
+					continue
 				}
-				log.Printf("Successfully mirror cloned [%s] to [%s]", remote, local)
+				_, err = touch(local)
+				if err != nil {
+					log.Printf("Failed mirror [%s] -> [%s]: touch error:'%s'", remote, local, err)
+					remove(local)
+					stat.FailedMirror++
+					continue
+				}
+				_, err = repack(local, config.MaxPackSize)
+				if err != nil {
+					log.Printf("Failed mirror [%s] -> [%s]: repack error:'%s'", remote, local, err)
+					remove(local)
+					stat.FailedMirror++
+					continue
+				}
+				_, err = update(local)
+				if err != nil {
+					log.Printf("Failed mirror [%s] -> [%s]. update error:'%s'", remote, local, err)
+					remove(local)
+					stat.FailedMirror++
+					continue
+				}
+				log.Printf("Successfully mirror [%s] -> [%s]", remote, local)
+				stat.Mirrored++
+			} else {
+				log.Printf("Updating [%s] -> [%s]", remote, local)
+				_, err := update(local)
+				if err != nil {
+					log.Printf("Failed update [%s] -> [%s] error: %s", remote, local, err)
+					stat.FailedUpdate++
+					continue
+				}
+				log.Printf("Successfully update [%s] -> [%s]", remote, local)
+				stat.Updated++
 			}
-			log.Printf("mirror update [%s] to [%s]", remote, local)
-			cmd := exec.Command("git", "-C", local, "remote", "update", "--prune")
-			err = cmd.Run()
-			if err != nil {
-				log.Fatalf("Failed to mirror clone [%s] to [%s]: %s", remote, local, err)
-			}
-			log.Printf("Successfully mirror updated [%s] to [%s]", remote, local)
 		}
+	}
+	for _, stat := range stats {
+		log.Printf("Source [%s] stats: repos:%d skipped:%d mirrored:%d updated:%d failed:%d failed_mirror:%d failed_update:%d", stat.Source.Username, len(stat.Repos), stat.Skipped, stat.Mirrored, stat.Updated, stat.Failed, stat.FailedMirror, stat.FailedUpdate)
 	}
 }
 
@@ -163,4 +215,65 @@ func skip(source *Source, remote string) bool {
 		return true
 	}
 	return false
+}
+
+func clone(url, local string) (*exec.Cmd, error) {
+	cmd := exec.Command("git", "clone", "--mirror", url, local)
+	err := cmd.Run()
+	return cmd, err
+}
+
+func touch(local string) (*exec.Cmd, error) {
+	cmd := exec.Command("touch", filepath.Join(local, "refs", ".gitkeep"))
+	err := cmd.Run()
+	return cmd, err
+}
+
+func repack(local string, maxPackSize int64) (*exec.Cmd, error) {
+	if maxPackSize == 0 {
+		return nil, nil
+	}
+	if maxPackSize < 1024*1024 {
+		maxPackSize = 1024 * 1024
+	}
+	_repack := false
+	filepath.WalkDir(filepath.Join(local, "objects", "pack"), func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if !strings.HasSuffix(d.Name(), ".pack") {
+			return nil
+		}
+		fi, _err := d.Info()
+		if _err != nil {
+			return _err
+		}
+		if fi.Size() >= maxPackSize {
+			_repack = true
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	if !_repack {
+		return nil, nil
+	}
+	size := fmt.Sprintf("%dm", maxPackSize/1024/1024)
+	cmd := exec.Command("git", "-C", local, "repack", "--max-pack-size="+size, "-A", "-d")
+	err := cmd.Run()
+	return cmd, err
+}
+
+func update(local string) (*exec.Cmd, error) {
+	cmd := exec.Command("git", "-C", local, "remote", "update")
+	err := cmd.Run()
+	return cmd, err
+}
+
+func remove(local string) (*exec.Cmd, error) {
+	cmd := exec.Command("rm", "-rf", local)
+	err := cmd.Run()
+	return cmd, err
 }
