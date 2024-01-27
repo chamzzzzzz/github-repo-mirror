@@ -23,7 +23,6 @@ type Source struct {
 type Config struct {
 	Sources     []*Source
 	Destination string
-	MaxPackSize int64
 }
 
 type Stat struct {
@@ -89,6 +88,13 @@ func main() {
 					stat.FailedMirror++
 					continue
 				}
+				_, err = disablegc(local)
+				if err != nil {
+					log.Printf("Failed mirror [%s] -> [%s]: disablegc error:'%s'", remote, local, err)
+					remove(local)
+					stat.FailedMirror++
+					continue
+				}
 				_, err = touch(local)
 				if err != nil {
 					log.Printf("Failed mirror [%s] -> [%s]: touch error:'%s'", remote, local, err)
@@ -96,12 +102,23 @@ func main() {
 					stat.FailedMirror++
 					continue
 				}
-				_, err = repack(local, config.MaxPackSize)
+				largestsize, _, err := objects(local)
 				if err != nil {
-					log.Printf("Failed mirror [%s] -> [%s]: repack error:'%s'", remote, local, err)
+					log.Printf("Failed mirror [%s] -> [%s]: objects error:'%s'", remote, local, err)
 					remove(local)
 					stat.FailedMirror++
 					continue
+				}
+				if largestsize > 95*1024*1024 {
+					log.Printf("Should repack [%s]. objects largestsize=%d", local, largestsize)
+					_, err = repack(local)
+					if err != nil {
+						log.Printf("Failed mirror [%s] -> [%s]: repack error:'%s'", remote, local, err)
+						remove(local)
+						stat.FailedMirror++
+						continue
+					}
+					log.Printf("Repack [%s] finished.", local)
 				}
 				_, err = update(local)
 				if err != nil {
@@ -114,15 +131,15 @@ func main() {
 				stat.Mirrored++
 			} else {
 				log.Printf("Updating [%s] -> [%s]", remote, local)
-				_, err := update(local)
+				_, err = disablegc(local)
 				if err != nil {
-					log.Printf("Failed update [%s] -> [%s] error: %s", remote, local, err)
+					log.Printf("Failed update [%s] -> [%s]: disablegc error:'%s'", remote, local, err)
 					stat.FailedUpdate++
 					continue
 				}
-				_, err = repack(local, config.MaxPackSize)
+				_, err := update(local)
 				if err != nil {
-					log.Printf("Failed update [%s] -> [%s]: repack error:'%s'", remote, local, err)
+					log.Printf("Failed update [%s] -> [%s] error: %s", remote, local, err)
 					stat.FailedUpdate++
 					continue
 				}
@@ -235,21 +252,15 @@ func touch(local string) (*exec.Cmd, error) {
 	return cmd, err
 }
 
-func repack(local string, maxPackSize int64) (*exec.Cmd, error) {
-	if maxPackSize == 0 {
-		return nil, nil
-	}
-	if maxPackSize < 1024*1024 {
-		maxPackSize = 1024 * 1024
-	}
-	_repack := false
-	filepath.WalkDir(filepath.Join(local, "objects", "pack"), func(path string, d fs.DirEntry, err error) error {
+func objects(local string) (largestsize int64, count int64, err error) {
+	err = filepath.WalkDir(filepath.Join(local, "objects"), func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if d.IsDir() {
 			return nil
 		}
+		count++
 		if !strings.HasSuffix(d.Name(), ".pack") {
 			return nil
 		}
@@ -257,33 +268,28 @@ func repack(local string, maxPackSize int64) (*exec.Cmd, error) {
 		if _err != nil {
 			return _err
 		}
-		if fi.Size() >= maxPackSize {
-			_repack = true
-			return filepath.SkipAll
+		if fi.Size() >= largestsize {
+			largestsize = fi.Size()
 		}
 		return nil
 	})
-	if !_repack {
-		return nil, nil
-	}
-	size := fmt.Sprintf("%dm", maxPackSize/1024/1024)
-	log.Printf("Repacking [%s] max-pack-size:%s", local, size)
-	cmd := exec.Command("git", "-C", local, "repack", "--max-pack-size="+size, "-A", "-d")
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	return
+}
+
+func repack(local string) (*exec.Cmd, error) {
+	cmd := exec.Command("git", "-C", local, "repack", "--max-pack-size=95m", "-A", "-d")
 	err := cmd.Run()
-	if err != nil {
-		log.Printf("Repack [%s] Failed.", local)
-	} else {
-		log.Printf("Repack [%s] Successful.", local)
-	}
 	return cmd, err
 }
 
 func update(local string) (*exec.Cmd, error) {
 	cmd := exec.Command("git", "-C", local, "remote", "update")
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	err := cmd.Run()
+	return cmd, err
+}
+
+func disablegc(local string) (*exec.Cmd, error) {
+	cmd := exec.Command("git", "-C", local, "config", "--local", "gc.auto", "0")
 	err := cmd.Run()
 	return cmd, err
 }
