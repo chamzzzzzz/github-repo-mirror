@@ -267,13 +267,23 @@ func repack(local string, maxPackSize int64) (*exec.Cmd, error) {
 		return nil, nil
 	}
 	size := fmt.Sprintf("%dm", maxPackSize/1024/1024)
+	log.Printf("Repacking [%s] max-pack-size:%s", local, size)
 	cmd := exec.Command("git", "-C", local, "repack", "--max-pack-size="+size, "-A", "-d")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
 	err := cmd.Run()
+	if err != nil {
+		log.Printf("Repack [%s] Failed.", local)
+	} else {
+		log.Printf("Repack [%s] Successful.", local)
+	}
 	return cmd, err
 }
 
 func update(local string) (*exec.Cmd, error) {
 	cmd := exec.Command("git", "-C", local, "remote", "update")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
 	err := cmd.Run()
 	return cmd, err
 }
