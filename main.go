@@ -164,9 +164,14 @@ func main() {
 			}
 		}
 	}
+	code := 0
 	for _, stat := range stats {
 		log.Printf("Source [%s] stats: repos:%d skipped:%d mirrored:%d updated:%d failed:%d failed_mirror:%d failed_update:%d", stat.Source.Username, len(stat.Repos), stat.Skipped, stat.Mirrored, stat.Updated, stat.Failed, stat.FailedMirror, stat.FailedUpdate)
+		if stat.Failed > 0 || stat.FailedMirror > 0 || stat.FailedUpdate > 0 {
+			code = 1
+		}
 	}
+	os.Exit(code)
 }
 
 func loadConfig() (*Config, error) {
