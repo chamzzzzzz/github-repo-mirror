@@ -143,6 +143,22 @@ func main() {
 					stat.FailedUpdate++
 					continue
 				}
+				largestsize, _, err := objects(local)
+				if err != nil {
+					log.Printf("Failed update [%s] -> [%s]: objects error:'%s'", remote, local, err)
+					stat.FailedUpdate++
+					continue
+				}
+				if largestsize > 95*1024*1024 {
+					log.Printf("Should repack [%s]. objects largestsize=%d", local, largestsize)
+					_, err = repack(local)
+					if err != nil {
+						log.Printf("Failed update [%s] -> [%s]: repack error:'%s'", remote, local, err)
+						stat.FailedUpdate++
+						continue
+					}
+					log.Printf("Repack [%s] finished.", local)
+				}
 				log.Printf("Successfully update [%s] -> [%s]", remote, local)
 				stat.Updated++
 			}
