@@ -65,6 +65,10 @@ func main() {
 		for _, repo := range repos {
 			remote := fmt.Sprintf("https://github.com/%s.git", repo.FullName)
 			local := fmt.Sprintf("%s.git", filepath.Join(config.Destination, "github.com", repo.FullName))
+			url := remote
+			if repo.Private {
+				url = strings.Replace(remote, "https://", fmt.Sprintf("https://%s:%s@", source.Username, source.Token), 1)
+			}
 			if skip(source, remote) {
 				stat.Skipped++
 				continue
@@ -75,10 +79,6 @@ func main() {
 					log.Printf("Failed to stat [%s]: %s", local, err)
 					stat.Failed++
 					continue
-				}
-				url := remote
-				if repo.Private {
-					url = strings.Replace(remote, "https://", fmt.Sprintf("https://%s:%s@", source.Username, source.Token), 1)
 				}
 				log.Printf("Mirroring [%s] -> [%s]", remote, local)
 				_, err := clone(url, local)
@@ -134,6 +134,12 @@ func main() {
 				_, err = disablegc(local)
 				if err != nil {
 					log.Printf("Failed update [%s] -> [%s]: disablegc error:'%s'", remote, local, err)
+					stat.FailedUpdate++
+					continue
+				}
+				_, err = remoteseturl(local, "origin", url)
+				if err != nil {
+					log.Printf("Failed update [%s] -> [%s]: remoteseturl error:'%s'", remote, local, err)
 					stat.FailedUpdate++
 					continue
 				}
@@ -317,6 +323,12 @@ func disablegc(local string) (*exec.Cmd, error) {
 
 func remove(local string) (*exec.Cmd, error) {
 	cmd := exec.Command("rm", "-rf", local)
+	err := cmd.Run()
+	return cmd, err
+}
+
+func remoteseturl(local string, name string, url string) (*exec.Cmd, error) {
+	cmd := exec.Command("git", "-C", local, "remote", "set-url", name, url)
 	err := cmd.Run()
 	return cmd, err
 }
